@@ -1,0 +1,248 @@
+#include "ImageValue.h"
+#include <opencv2/opencv.hpp>
+#include<Histogram.h>
+#include<WaterShedAlgorithm.h>
+#include<WatershedPixel.h>
+#include<WatershedStructure.h>
+#include <QUrl>
+#include"camera1394.h"
+#include "connectsql.h"
+#include "UniControl.h"
+#include "UniTransform.h"
+#define UINT8P_CAST(x) reinterpret_cast<UINT8*>(x)
+
+ImageValue::ImageValue(QObject *parent):
+    QObject(parent),m_BubbleNumber("Number"),m_BubbleSize("Size"),m_GrayMean("Mean"),m_SbGrade(0),m_ZhidaoYaoji(),m_YaojiList()
+{
+}
+QString ImageValue::getBubbleNumber(void) const
+{
+    return m_BubbleNumber;
+}
+void ImageValue::setBubbleNumber(const QString BubbleNumber)
+{
+    m_BubbleNumber=BubbleNumber;
+    emit BubbleNumberChanged();
+}
+
+QString ImageValue::getBubbleSize(void) const
+{
+    return m_BubbleSize;
+}
+void ImageValue::setBubbleSize(const QString BubbleSize)
+{
+    m_BubbleSize=BubbleSize;
+    emit BubbleSizeChanged();
+}
+
+QString ImageValue::getGrayMean(void) const
+{
+    return m_GrayMean;
+}
+void ImageValue::setGrayMean(const QString GrayMean)
+{
+    m_GrayMean=GrayMean;
+    emit GrayMeanChanged();
+}
+
+int ImageValue::getSbGrade(void)const
+{
+    return m_SbGrade;
+}
+void ImageValue::setSbGrade(const int SbGrade)
+{
+    m_SbGrade=SbGrade;
+    emit SbGradeChanged();
+}
+
+
+QList<int> ImageValue::getZhidaoYaoji(void) const
+{
+    return m_ZhidaoYaoji;
+}
+
+void ImageValue::setZhidaoYaoji(const QList<int> ZhidaoYaoji)
+{
+    m_ZhidaoYaoji=ZhidaoYaoji;
+    emit ZhidaoYaojiChanged();
+}
+
+QList<int> ImageValue::getYaojiList(void) const
+{
+    return m_YaojiList;
+}
+
+void ImageValue::setYaojiList(const QList<int> YaojiList)
+{
+    m_YaojiList=YaojiList;
+    emit YaojiListChanged();
+}
+
+//void ImageValue::getImageValue(QUrl url)
+void ImageValue::getImageValue(void)
+{
+    Histogram h;//创建图像增强算法实例;
+    WatershedAlgorithm myWatershed;	// 创建分水岭算法实例;
+    Camera1394 camerazz;
+    int nr=camerazz.getimageheight();
+    int nc=camerazz.getimagewidth();
+    int imagesize=nc*nr;
+   cv::Mat  opencvimage(nr,nc,CV_8UC3);
+   UCC_GetBitmapImage(camerazz.getCameraID(),UINT8P_CAST(opencvimage.data),1000);
+
+    double GlobleBubbleNumber=0;
+    double GlobleBubbleSize=0;
+    double GlobleGrayMean=0;
+    double sumgrayvalue=0;
+    int GlobleSbGrade=0;
+
+
+    //3.define image container which will be used later
+    cv::Mat  opencvimage_gray;
+    cv::Mat  opencvimage_imadjust;
+    cv::Mat  element=getStructuringElement( MORPH_ELLIPSE,cv::Size(7,7), Point(-1,-1));
+    cv::Mat  opencvimage_imopen;
+    cv::Mat  opencvimage_imdilated;
+    cv::Mat  opencvimage_not;
+    cv::Mat  WSS;
+
+
+    //4.image processing:image gray-image adjust-image open-image dilate-image not- watershed
+    cv::cvtColor(opencvimage,opencvimage_gray,CV_RGB2GRAY);
+   // imshow("Gray image",opencvimage_gray);//only run in debug
+
+    opencvimage_imadjust=h.stretch1(opencvimage_gray,3000);
+  //  imshow("adjust image",opencvimage_imadjust);
+
+    cv::morphologyEx(opencvimage_imadjust,opencvimage_imopen,MORPH_OPEN,element);
+   // imshow("open image",opencvimage_imopen);
+
+    cv::dilate(opencvimage_imopen,opencvimage_imdilated,element);
+   // imshow("dilatedimage",opencvimage_imdilated);
+
+    cv::bitwise_not(opencvimage_imdilated,opencvimage_not);
+   // imshow("notimage",opencvimage_not);
+
+    WSS=myWatershed.run(opencvimage_not);//return WSS as the result of watershed;
+   // imshow("wtershed result1",WSS);
+//    imshow("wtershed result2",WSS+opencvimage_gray);//显示分割效果
+
+
+
+
+    //5.caculate the value of image:1>BubbleNumber;2>BubbleSize;3>GrayMean
+    //5.1 BubbleNumber
+    std::vector<std::vector<cv::Point> >contours;
+    cv::findContours(WSS,contours,CV_RETR_LIST,CV_CHAIN_APPROX_NONE);
+    GlobleBubbleNumber=contours.size();
+
+    //5.2 BubbleSize
+    GlobleBubbleSize=imagesize/GlobleBubbleNumber;
+
+    //5.3 GrayMean
+    if (opencvimage_gray.isContinuous())
+    {
+        nc=nr*nc;
+        nr=1;
+    }
+    for (int j=0;j<nr;j++)
+        {
+            uchar* data=opencvimage_gray.ptr<uchar>(j);
+            for (int i=0;i<nc;i++)
+            {
+                sumgrayvalue=sumgrayvalue+data[i];
+            }
+        }
+    GlobleGrayMean=sumgrayvalue/imagesize;
+
+
+    //6. set value and send singnals
+    setBubbleNumber(QString::number(GlobleBubbleNumber));
+    setBubbleSize(QString::number(GlobleBubbleSize));
+    setGrayMean(QString::number(GlobleGrayMean));
+    //7.insert value to sql and get zhidaoyaoji
+    if (sqlconnect("frothzz"))
+    {
+        QSqlQuery qry;
+
+        //1>inset bubble value to sql
+        QString insertsql="INSERT INTO [frothzz].[dbo].[BubbleValue] ([BubbleNumber],[BubbleSize],[GrayMean]) VALUES(:v1,:v2,:v3)";
+        qry.prepare(insertsql);
+        qry.bindValue(":v1",QString::number(GlobleBubbleNumber));
+        qry.bindValue(":v2",QString::number(GlobleBubbleSize));
+        qry.bindValue(":v3",QString::number(GlobleGrayMean));
+
+        //2> select the current guize by graymean value
+        QString selectguize="select * FROM [frothzz].[dbo].[专家规则] where 灰度均值=(SELECT Min(Abs(灰度均值-"+QString::number(GlobleGrayMean)+"))+"+QString::number(GlobleGrayMean)+" FROM [frothzz].[dbo].[专家规则])";
+        qry.exec(selectguize);
+        qry.next();
+        GlobleSbGrade=qry.value(0).toInt();
+        setSbGrade(GlobleSbGrade);
+
+        //3> choose the zhidaoyaoji from current guize
+        QList<int> current_ZhidaoYaoji;
+        current_ZhidaoYaoji<<0<<0<<0<<0<<0<<0<<0<<0<<0<<0<<0<<0<<0<<0;
+        current_ZhidaoYaoji[0]=qry.value(4).toInt();//sb黑药
+        current_ZhidaoYaoji[1]=qry.value(5).toInt();//sb硫酸铜
+        current_ZhidaoYaoji[2]=qry.value(6).toInt();//sb硝酸铅
+        current_ZhidaoYaoji[3]=qry.value(7).toInt();//sb黄药
+        current_ZhidaoYaoji[4]=qry.value(8).toInt();//sb二号油
+
+        current_ZhidaoYaoji[5]=qry.value(9).toInt();//au纯碱老
+        current_ZhidaoYaoji[6]=qry.value(10).toInt();//au纯碱新
+        current_ZhidaoYaoji[7]=qry.value(11).toInt();//au硫酸铜
+        current_ZhidaoYaoji[8]=qry.value(12).toInt();//au黄药
+        current_ZhidaoYaoji[9]=qry.value(13).toInt();//au二号油
+        current_ZhidaoYaoji[10]=qry.value(14).toInt();//au硫化钠
+        setZhidaoYaoji(current_ZhidaoYaoji);
+    }
+
+
+    //8.get current yaoji
+    if (sqlconnect("YaoJiDBF"))
+{
+        QSqlQuery qry;
+        QList<int> current_YaojiList;
+
+        current_YaojiList<<0<<0<<0<<0<<0<<0<<0<<0<<0<<0<<0<<0;//init, think of another way
+        qry.exec("SELECT Top 1 * FROM [YaoJiDBF].[dbo].[调节表] WHERE 药剂种类='碳酸钠' AND 加药点='碳酸钠搅拌桶' order by id desc ");//select last one
+        qry.first();
+        current_YaojiList[0]=qry.value(6).toInt();
+        qry.exec("SELECT Top 1 * FROM [YaoJiDBF].[dbo].[调节表] WHERE 药剂种类='碳酸钠' AND 加药点='碳酸球磨池' order by id desc");
+        qry.first();
+        current_YaojiList[1]=qry.value(6).toInt();
+        qry.exec("SELECT Top 1 * FROM [YaoJiDBF].[dbo].[调节表] WHERE 药剂种类='硫酸铜' AND 加药点='硫酸铜搅拌桶' order by id desc");
+        qry.first();
+        current_YaojiList[2]=qry.value(6).toInt();
+        qry.exec("SELECT Top 1 * FROM [YaoJiDBF].[dbo].[调节表] WHERE 药剂种类='黄药' AND 加药点='黄药搅拌桶' order by id desc");
+        qry.first();
+        current_YaojiList[3]=qry.value(6).toInt();
+        qry.exec("SELECT Top 1 * FROM [YaoJiDBF].[dbo].[调节表] WHERE 药剂种类='2#油' AND 加药点='2#油搅拌桶' order by id desc");
+        qry.first();
+        current_YaojiList[4]=qry.value(6).toInt();
+        qry.exec("SELECT Top 1 * FROM [YaoJiDBF].[dbo].[调节表] WHERE 药剂种类='硫化钠' AND 加药点='硫化钠' order by id desc");
+        qry.first();
+        current_YaojiList[5]=qry.value(6).toInt();
+
+        qry.exec("SELECT Top 1 * FROM [YaoJiDBF].[dbo].[调节表] WHERE 药剂种类='黑药' AND 加药点='黑药' order by id desc");
+        qry.first();
+        current_YaojiList[6]=qry.value(6).toInt();
+        qry.exec("SELECT Top 1 * FROM [YaoJiDBF].[dbo].[调节表] WHERE 药剂种类='硫酸铜' AND 加药点='硫酸铜锑粗选' order by id desc");
+        qry.first();
+        current_YaojiList[7]=qry.value(6).toInt();
+        qry.exec("SELECT Top 1 * FROM [YaoJiDBF].[dbo].[调节表] WHERE 药剂种类='硝酸铅' AND 加药点='硝酸铅锑粗选' order by id desc");
+        qry.first();
+        current_YaojiList[8]=qry.value(6).toInt();
+        qry.exec("SELECT Top 1 * FROM [YaoJiDBF].[dbo].[调节表] WHERE 药剂种类='黄药' AND 加药点='黄药锑粗选' order by id desc");
+        qry.first();
+        current_YaojiList[9]=qry.value(6).toInt();
+        qry.exec("SELECT Top 1 * FROM [YaoJiDBF].[dbo].[调节表] WHERE 药剂种类='2#油' AND 加药点='2#油锑粗选' order by id desc");
+        qry.first();
+        current_YaojiList[10]=qry.value(6).toInt();
+        setYaojiList(current_YaojiList);
+
+    }
+
+
+
+}
